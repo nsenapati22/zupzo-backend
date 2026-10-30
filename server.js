@@ -17,17 +17,19 @@ app.get('/', (req, res) => {
   res.send('🚀 ZUPZO WhatsApp Engine is Live!');
 });
 
-// 1. Meta Webhook Verification Handshake
+// 1. Instant Meta Handshake (Zero-delay, No Environment dependency)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === process.env.META_VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token === 'zupzo_secret_token_123') {
+    console.log('Webhook verified successfully!');
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
+
 
 // 2. Incoming WhatsApp Message Router
 app.post('/webhook', async (req, res) => {
