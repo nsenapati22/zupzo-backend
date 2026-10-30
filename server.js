@@ -8,39 +8,50 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+// Supabase Connection
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// In-Memory user session state (Temporary storage for order flow)
+// User Conversational Session State
 const userSessions = {};
 
+// 1. Healthcheck Route (To keep server warm)
 app.get('/', (req, res) => {
-  res.send('🚀 ZUPZO WhatsApp Engine is Live!');
+  res.status(200).send('🚀 ZUPZO Production Engine is Live & Healthy!');
 });
 
-// 1. Instant Meta Handshake (Zero-delay, No Environment dependency)
+// 2. Strict Meta Webhook Handshake Verification (Plain Text Response)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === 'zupzo_secret_token_123') {
-    console.log('Webhook verified successfully!');
+  const expectedToken = process.env.META_VERIFY_TOKEN || 'zupzo_secret_token_123';
+
+  if (mode === 'subscribe' && token === expectedToken) {
+    console.log('✅ Meta Webhook Verified Successfully!');
+    res.setHeader('Content-Type', 'text/plain');
     return res.status(200).send(challenge);
   }
+
+  console.warn('❌ Webhook verification failed. Received token:', token);
   return res.sendStatus(403);
 });
 
-
-// 2. Incoming WhatsApp Message Router
+// 3. Incoming WhatsApp Webhook Router
 app.post('/webhook', async (req, res) => {
   try {
-    const entry = req.body.entry?.[0];
+    const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0]?.value;
     const message = changes?.messages?.[0];
 
-    if (!message) return res.sendStatus(200);
+    // Meta demands a quick 200 OK acknowledgment immediately
+    res.status(200).send('EVENT_RECEIVED');
 
-    const fromPhone = message.from; // Customer WhatsApp Number (e.g., 919876543210)
+    if (!message) return;
+
+    const fromPhone = message.from;
     const type = message.type;
 
     if (!userSessions[fromPhone]) {
@@ -49,7 +60,6 @@ app.post('/webhook', async (req, res) => {
 
     const session = userSessions[fromPhone];
 
-    // Handle Button Clicks or Interactive List Selections
     if (type === 'interactive') {
       const interactiveType = message.interactive.type;
       let selectedId = '';
@@ -61,27 +71,19 @@ app.post('/webhook', async (req, res) => {
       }
 
       await handleInteractiveResponse(fromPhone, selectedId, session);
-    } 
-    // Handle Text Messages
-    else if (type === 'text') {
+    } else if (type === 'text') {
       const text = message.text.body.trim();
       await handleTextMessage(fromPhone, text, session);
-    } 
-    // Handle GPS Pin Location
-    else if (type === 'location') {
-      const { latitude, longitude } = message.location;
-      await sendTextMessage(fromPhone, `📍 Location pinned successfully! Fetching nearby active kitchens...`);
+    } else if (type === 'location') {
+      await sendTextMessage(fromPhone, '📍 Location received! Locating nearest cloud kitchens...');
       await showOutletsList(fromPhone);
     }
-
-    res.sendStatus(200);
   } catch (error) {
-    console.error('Webhook Error:', error.message);
-    res.sendStatus(500);
+    console.error('Error handling webhook event:', error.message);
   }
 });
 
-// Step-by-Step Message Logic
+// Message Flow Controller
 async function handleTextMessage(phone, text, session) {
   const lower = text.toLowerCase();
 
@@ -89,21 +91,18 @@ async function handleTextMessage(phone, text, session) {
     session.step = 'AWAITING_OUTLET';
     session.cart = [];
     await showOutletsList(phone);
-  } 
-  else if (session.step === 'AWAITING_ADDRESS') {
-    // Save address and place order
+  } else if (session.step === 'AWAITING_ADDRESS') {
     session.address = text;
     await finalizeWhatsAppOrder(phone, session);
-  } 
-  else {
+  } else {
     await sendTextMessage(
       phone,
-      `Welcome to *ZUPZO Food Delivery*! 🛵\n\nTo view menu and place order, please reply with *Hi* or send your current *Location*.`
+      'Welcome to *ZUPZO Food Delivery*! 🛵\n\nTo view restaurants and place an order, reply with *Hi* or share your current *Location*.'
     );
   }
 }
 
-// Show Restaurants/Kitchens List
+// Show Restaurants
 async function showOutletsList(phone) {
   const { data: restaurants } = await supabase
     .from('restaurants')
@@ -112,14 +111,14 @@ async function showOutletsList(phone) {
     .limit(5);
 
   if (!restaurants || restaurants.length === 0) {
-    await sendTextMessage(phone, 'Sorry, no active kitchens available in your zone right now.');
+    await sendTextMessage(phone, 'Sorry, no active kitchens are operating right now.');
     return;
   }
 
   const rows = restaurants.map((r) => ({
     id: `RESTO_${r.id}`,
     title: r.name.slice(0, 24),
-    description: 'Fast express delivery',
+    description: 'Fresh Kitchen Partner',
   }));
 
   const listPayload = {
@@ -128,8 +127,8 @@ async function showOutletsList(phone) {
     type: 'interactive',
     interactive: {
       type: 'list',
-      header: { type: 'text', text: 'Select Kitchen Outlet' },
-      body: { text: 'Choose your preferred cloud kitchen to view available food items:' },
+      header: { type: 'text', text: 'Select Kitchen' },
+      body: { text: 'Choose your preferred kitchen outlet to explore available menu items:' },
       footer: { text: 'ZUPZO Express' },
       action: {
         button: 'View Outlets',
@@ -141,7 +140,7 @@ async function showOutletsList(phone) {
   await sendMetaRaw(listPayload);
 }
 
-// Show Items Menu for Selected Outlet
+// Show Menu Items
 async function showOutletMenu(phone, restoId, session) {
   session.selectedRestoId = restoId;
   session.step = 'SELECTING_ITEMS';
@@ -154,7 +153,7 @@ async function showOutletMenu(phone, restoId, session) {
     .limit(8);
 
   if (!items || items.length === 0) {
-    await sendTextMessage(phone, 'No items currently in stock at this outlet.');
+    await sendTextMessage(phone, 'No items are in stock at this kitchen.');
     return;
   }
 
@@ -171,8 +170,8 @@ async function showOutletMenu(phone, restoId, session) {
     interactive: {
       type: 'list',
       header: { type: 'text', text: 'ZUPZO Menu' },
-      body: { text: 'Tap an item to add it to your order tray:' },
-      footer: { text: 'Tap multiple times for multiple items' },
+      body: { text: 'Select a dish to add it to your order tray:' },
+      footer: { text: 'Tap multiple dishes if desired' },
       action: {
         button: 'Select Dish',
         sections: [{ title: 'Fresh Dishes', rows: rows }],
@@ -183,23 +182,19 @@ async function showOutletMenu(phone, restoId, session) {
   await sendMetaRaw(listPayload);
 }
 
-// Handle Interactive Button / List Click
+// Interactive Responses
 async function handleInteractiveResponse(phone, actionId, session) {
   if (actionId.startsWith('RESTO_')) {
     const restoId = actionId.replace('RESTO_', '');
     await showOutletMenu(phone, restoId, session);
-  } 
-  else if (actionId.startsWith('ITEM_')) {
+  } else if (actionId.startsWith('ITEM_')) {
     const parts = actionId.split('_');
     const itemId = parts[1];
     const price = parseFloat(parts[2]);
 
-    // Add item to cart
     session.cart.push({ itemId, price });
-
     const totalBill = session.cart.reduce((sum, i) => sum + i.price, 0);
 
-    // Send Cart Summary with Checkout Button
     const buttonsPayload = {
       messaging_product: 'whatsapp',
       to: phone,
@@ -207,7 +202,7 @@ async function handleInteractiveResponse(phone, actionId, session) {
       interactive: {
         type: 'button',
         body: {
-          text: `✅ *Item Added!*\n\nCurrent Items in Cart: *${session.cart.length}*\nTotal Bill: *₹${totalBill}* (Excl. delivery)\n\nAdd more dishes or proceed to confirm:`,
+          text: `✅ *Item Added to Tray!*\n\nItems in Cart: *${session.cart.length}*\nSubtotal: *₹${totalBill}*\n\nAdd more items or confirm your order:`,
         },
         action: {
           buttons: [
@@ -217,7 +212,7 @@ async function handleInteractiveResponse(phone, actionId, session) {
             },
             {
               type: 'reply',
-              reply: { id: 'CHECKOUT', title: '🛍️ Confirm Order' },
+              reply: { id: 'CHECKOUT', title: '🛍️ Checkout' },
             },
           ],
         },
@@ -225,25 +220,23 @@ async function handleInteractiveResponse(phone, actionId, session) {
     };
 
     await sendMetaRaw(buttonsPayload);
-  } 
-  else if (actionId.startsWith('MORE_')) {
+  } else if (actionId.startsWith('MORE_')) {
     const restoId = actionId.replace('MORE_', '');
     await showOutletMenu(phone, restoId, session);
-  } 
-  else if (actionId === 'CHECKOUT') {
+  } else if (actionId === 'CHECKOUT') {
     if (session.cart.length === 0) {
-      await sendTextMessage(phone, 'Your cart is empty! Reply with *Hi* to browse menu.');
+      await sendTextMessage(phone, 'Your tray is empty. Send *Hi* to browse again.');
       return;
     }
     session.step = 'AWAITING_ADDRESS';
     await sendTextMessage(
       phone,
-      `🏠 *Delivery Address Needed:*\n\nPlease reply with your complete Address / Village name and nearby landmark (e.g., *House No 12, Main Road, Near Primary School*).`
+      '🏠 *Delivery Address:*\n\nPlease reply with your complete Village name / colony and landmark (e.g., *Near High School, Main Gate*).'
     );
   }
 }
 
-// Finalize Order & Save to Supabase
+// Final Order Execution
 async function finalizeWhatsAppOrder(phone, session) {
   const itemsTotal = session.cart.reduce((sum, i) => sum + i.price, 0);
   const deliveryFee = 25.0;
@@ -252,7 +245,6 @@ async function finalizeWhatsAppOrder(phone, session) {
   const otpPin = Math.floor(1000 + Math.random() * 9000).toString();
   const orderNumber = 'WA-' + Math.floor(100000 + Math.random() * 900000);
 
-  // 1. Insert Core Order into Supabase
   const { data: newOrder, error } = await supabase
     .from('orders')
     .insert([
@@ -276,11 +268,10 @@ async function finalizeWhatsAppOrder(phone, session) {
 
   if (error) {
     console.error('Order creation error:', error);
-    await sendTextMessage(phone, 'Failed to place order. Please try again.');
+    await sendTextMessage(phone, 'Sorry, failed to book your order. Please retry.');
     return;
   }
 
-  // 2. Insert Items Breakdown
   const itemsPayload = session.cart.map((c) => ({
     order_id: newOrder.id,
     menu_item_id: c.itemId,
@@ -289,24 +280,22 @@ async function finalizeWhatsAppOrder(phone, session) {
   }));
   await supabase.from('order_items').insert(itemsPayload);
 
-  // 3. Reset Session
   delete userSessions[phone];
 
-  // 4. Send Confirmation Message to Customer
   const confirmMsg =
     `🎉 *Order Confirmed!* (ID: #${orderNumber})\n\n` +
-    `🍽️ *Items Total:* ₹${itemsTotal}\n` +
+    `🍽️ *Food Total:* ₹${itemsTotal}\n` +
     `🛵 *Delivery Charge:* ₹${deliveryFee}\n` +
-    `💵 *Total Amount:* ₹${grandTotal}\n` +
-    `📍 *Address:* ${session.address}\n\n` +
-    `🔐 *Your Delivery OTP:* *${otpPin}*\n` +
-    `_(Please share this OTP with the delivery boy upon arrival)_\n\n` +
-    `Kitchen has received your order. We will update you once it is dispatched! ⚡`;
+    `💵 *Payable Amount:* ₹${grandTotal}\n` +
+    `📍 *Delivery Address:* ${session.address}\n\n` +
+    `🔐 *Delivery Verification PIN:* *${otpPin}*\n` +
+    `_(Provide this PIN to your delivery agent upon arrival)_\n\n` +
+    `Our kitchen has commenced preparation. Thank you for choosing ZUPZO! ⚡`;
 
   await sendTextMessage(phone, confirmMsg);
 }
 
-// Meta API Helpers
+// Outbound Message Senders
 async function sendTextMessage(phone, text) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -318,26 +307,29 @@ async function sendTextMessage(phone, text) {
 }
 
 async function sendMetaRaw(payload) {
-  if (!process.env.META_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN === 'temp_token') {
-    console.log('[LOCAL SIMULATION WA]', JSON.stringify(payload, null, 2));
+  const token = process.env.META_ACCESS_TOKEN;
+  const phoneId = process.env.META_PHONE_ID;
+
+  if (!token || token === 'temp_token') {
+    console.log('[LOCAL DISPATCH SIMULATOR]', JSON.stringify(payload, null, 2));
     return;
   }
 
   try {
     await axios.post(
-      `https://graph.facebook.com/v21.0/${process.env.META_PHONE_ID}/messages`,
+      `https://graph.facebook.com/v21.0/${phoneId}/messages`,
       payload,
       {
         headers: {
-          Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       }
     );
   } catch (err) {
-    console.error('Meta API Dispatch Error:', err.response?.data || err.message);
+    console.error('Meta API Error:', err.response?.data || err.message);
   }
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ZUPZO Engine active on port ${PORT}`));
+app.listen(PORT, () => console.log(`ZUPZO Backend Server running on port ${PORT}`));
